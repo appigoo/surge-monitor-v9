@@ -1,6 +1,95 @@
 """
-股票監控儀表板 - 完整修復版 v3.0
+股票監控儀表板 - 完整修復版 v3.7
 ==================================
+v3.7 AI Prompt 功能（免 API，複製貼去任何 AI 使用）：
+47. _save_ticker_snapshot：主監控每次刷新後把即時快照存入 session_state，
+    包含價格、全部技術指標、信號、K線形態、成交量、VIX、成交密集區、近5根K線。
+48. _build_signal_prompt（場景A）：每個 ticker tab 加入「複製 AI Prompt」expander，
+    自動注入即時市況 + 三維回測最佳組合 + 爆升回測特徵 + 密集區支撐壓力，
+    用戶複製貼去 ChatGPT/Claude/Gemini 即獲具體操作建議，無需花費 API。
+49. _build_overview_prompt（場景B）：在爆升回測區域上方加入「每日總覽 Prompt」，
+    一次彙總所有監控股票的快照，讓 AI 給出今日操作優先級排序。
+50. AI 對話改善：切換 ticker 時自動清空對話歷史（避免上下文混亂）；
+    system prompt 從只有爆升回測摘要，升級為注入完整即時快照 + 回測數據雙重上下文。
+
+v3.6 信號全面修復（逐一審查 62 個信號後修正 11 項錯誤 + 12 項警告）：
+── 🔴 錯誤修復 ──
+36. HIGH_N_HIGH / LOW_N_LOW：改為在 _mark_one 用 OHLC 直接計算，
+    不再依賴回測中為 NaN 的 Close_N_High/Low 欄位，回測現在可正常觸發。
+    LOW_N_LOW 加入 SELL_SIGNALS（原本缺失，回測方向算成做多）。
+    HIGH_N_HIGH / LOW_N_LOW 加入 ALL_SIGNAL_TYPES（原本 Telegram 選不到）。
+37. 📈 衰竭跳空(上)：改名為 📉 衰竭跳空(上)，加入 SELL_SIGNALS。
+    本質是看空信號（跳空高開後收陰回吐），原用 📈 標記且不在 SELL_SIGNALS，
+    回測方向完全錯誤。
+38. 🔄 新转折点：拆分為 🔄 新转折点(漲) / 🔄 新转折点(跌) 兩個有方向的信號。
+    原信號漲跌都觸發同一個名稱，且 MACD>Signal 只過濾多頭但漲跌皆算，邏輯矛盾。
+    新转折点(跌) 加入 SELL_SIGNALS。
+39. 📈 EMA-SMA Uptrend Buy / 📉 EMA-SMA Downtrend Sell：加入交叉判斷
+    (pv(EMA5)<=pv(EMA10))，從「每天都觸發的狀態信號」改為「交叉當天才觸發的轉折信號」。
+40. 📈 EMA10_30_40強烈買入 / 📉 EMA10_30_40強烈賣出：修正 EMA40 預設值陷阱。
+    原 row.get("EMA40", 0/999999)，EMA40 欄位缺失時幾乎必然觸發。
+    改為 pd.notna(row.get("EMA40")) 確認存在後才比較。
+41. 📈 錘頭線 / 📉 上吊線：原條件完全相同，RSI 30–70 時同時觸發矛盾信號。
+    加入5日趨勢方向判斷：下跌趨勢中（Close<5日均）→ 錘頭線；
+    上漲趨勢中（Close>5日均）→ 上吊線，且 RSI 門檻從<70/>30 收緊到<50/>50。
+42. 📉 BreakDown_5K：加入 SELL_SIGNALS（原本缺失，回測方向算成做多）。
+── 🟡 警告改善 ──
+43. 📈 SMA50上升趨勢 / 📉 SMA50下降趨勢：加入穿越判斷（pv(Close)<=pv(SMA50)），
+    從純狀態信號改為穿越當天才觸發。
+44. 📈 SMA50_200上升趨勢 / 📉 SMA50_200下降趨勢：同上。
+45. 📈 新买入信号 / 📉 新卖出信号：加入放量確認（Volume>前5均量），
+    過濾掉低量陽/陰線，提高信噪比。
+46. BreakOut_5K / BreakDown_5K 窗口與 MFI 解耦：原共用 mfi_win 參數，
+    改 MFI 窗口會連帶改突破窗口。改為固定 _BREAKOUT_WIN=5，與信號名稱語義一致。
+
+v3.5 信號修復：
+35. FIX「✅ 量價」回測缺席：原回測將「📈 股價漲跌幅(%)」和「📊 成交量變動幅(%)」
+    強制設為 np.nan，導致此信號在回測和逐筆驗證中永遠不觸發、無法評估歷史勝率。
+    改為在 _run_backtest_for_ticker 和 _bt_raw 兩處，以與主監控完全相同的公式計算：
+      pa = (|今日漲跌幅| - 5日均漲跌幅) / 5日均漲跌幅 × 100
+      va = (今日成交量 - 5日均量) / 5日均量 × 100
+    （Price Change % 和 前5均量 在 _enrich_data 已計算，回測亦有此欄位，
+     無需額外抓取數據，只需加兩行衍生計算）
+
+v3.4 優化與修復（10 項）：
+── P1 正確性 ──
+27. FIX P1-#1 _bt_raw 重複抓取：逐筆驗證改用 _fetch_price_data 快取函數，
+    與 _run_backtest_for_ticker 拿同一份數據，避免兩次抓取時間不同造成信號/驗證不一致。
+28. FIX P1-#3 compute_all_signals 崩潰防護：每根 K 線外層加 try/except，
+    單根數據異常（NaN/除零）回傳空字串而非拋出例外，整個 ticker tab 不再崩潰。
+── P2 效能 ──
+29. FIX P2-#4 主監控 yfinance 快取：新增 _fetch_price_data(ttl=60s)，
+    主監控改用此函數，每 60 秒內 rerun 不重打網路，保持近即時。
+30. FIX P2-#6 backtest_signal_combinations 舊入口傳 _ctx，省一次 onehot 重建。
+── P4 使用體驗 ──
+31. FIX P4-#9 Telegram parse_mode="HTML"：訊息加 HTML 解析模式，
+    emoji 和格式正確渲染，不再原文顯示星號。
+32. FIX P4-#10 並行結果排序：as_completed 完成順序隨機，
+    改為按 selected_tickers 原序重排後再顯示，介面一致。
+── Lint 清理（P3）──
+33. 移除 stock 未定義引用（改用 yf.Ticker(ticker).info）。
+34. 清理 17 處 pyflakes 警告：10 個無佔位符 f-string、ph/pl/closes/
+    test_non/n_surge/n_non 未用變量、import csv as _csv 未用 import。
+
+v3.3 加速清單（不影響信號準確度）：
+25. _build_onehot 共用（_BtCtx）：三個維度函數原各自重建 one-hot 矩陣（×3）；
+    改為在 _run_backtest_for_ticker 建立一次 _BtCtx 傳入，省去 2/3 前置時間。
+26. 多股票並行回測（ThreadPoolExecutor）：自動回測原為串行（N 支 × T 秒）；
+    改為最多 6 執行緒並行（yfinance 為 I/O bound，GIL 不影響），
+    13 支股票理論從 ~13T → ~3T。session_state/UI 寫入仍在主執行緒。
+    ⚠️ 對信號準確度零影響：每支股票數據/信號計算完全獨立。
+
+v3.2 修復清單：
+22. 全域 Telegram 信號選擇：原「每支股票各一個 multiselect」→ 改為側欄單一全域
+    選擇 (global_selected_signals)，套用所有股票；個別股票仍可用 tg_enabled_{ticker} 靜音。
+23. BUG-09 前瞻偏差修正：衰竭跳空(上/下)原用「下一根收盤」(data["Close"].iloc[idx+1])
+    判斷反轉 → look-ahead bias，會虛高回測勝率。改用當根 intrabar 證據判斷
+    （收盤回吐跳空 + 收盤位置），僅用當根 O/H/L/C，不偷看未來。
+24. 回測加速：
+    (a) _run_backtest_for_ticker 加 @st.cache_data(ttl=300) → 避免每次 rerun 重抓重算。
+    (b) 新增 _prefilter_signals：單一信號未達 min_occ 即剔除，任何含它的組合
+        必不達標。組合數可縮減 ~100x（信號越稀疏效果越大），×3 維度。
+
 v2.0 修復清單：
  1. matched_rank 未定義 NameError → 先初始化為 None
  2. while True + time.sleep() → time.sleep() + st.rerun()（Streamlit Cloud 相容）
@@ -43,6 +132,7 @@ from itertools import combinations
 import time
 import traceback
 import json
+import concurrent.futures
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="📈 股票監控儀表板", layout="wide", page_icon="📈")
@@ -76,6 +166,13 @@ SELL_SIGNALS = {
     "📉 Volume-MACD Sell","📉 EMA10_30賣出","📉 EMA10_30_40強烈賣出","📉 看跌吞沒",
     "📉 烏雲蓋頂","📉 上吊線","📉 黃昏之星","📉 VWAP賣出","📉 MFI熊背離賣出",
     "📉 OBV突破賣出","📉 VIX恐慌賣出","📉 VIX上升趨勢賣出",
+    # FIX v3.6: 以下兩個原本缺失，回測方向算成做多 → 修正為賣出
+    "📉 LOW_N_LOW",      # 收在當日極低位置 = 看空
+    "📉 BreakDown_5K",   # 跌破近期低點 = 看空
+    # FIX v3.6: 衰竭跳空(上)本質看空，改名並加入賣出集合（見 _mark_one）
+    "📉 衰竭跳空(上)",
+    # FIX v3.6: 新转折点拆分方向後，跌方向加入賣出集合
+    "🔄 新转折点(跌)",
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -115,6 +212,7 @@ def send_telegram_alert(msg: str, ticker: str = None) -> tuple:
         payload = {
             "chat_id":                  CHAT_ID,
             "text":                     msg,
+            "parse_mode":               "HTML",   # FIX P4-#9: 啟用 HTML 渲染，避免原文顯示星號
             "disable_web_page_preview": True,
             "disable_notification":     False,
         }
@@ -299,6 +397,246 @@ def compute_mfi_divergence(df: pd.DataFrame, window: int) -> pd.DataFrame:
     return df
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  AI PROMPT BUILDER  (v3.7)
+#  把即時數據、信號、回測結果濃縮成高品質 prompt，用戶可複製貼去任何 AI 使用
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _save_ticker_snapshot(ticker: str, data: "pd.DataFrame",
+                          dense_areas: list,
+                          period: str, interval: str) -> None:
+    """主監控每次刷新後把即時快照存入 session_state，供 prompt 生成函數讀取。"""
+    if data is None or len(data) < 2:
+        return
+    last = data.iloc[-1]
+    prev = data.iloc[-2]
+
+    def _safe(val, fmt=".2f"):
+        try:
+            return f"{float(val):{fmt}}" if pd.notna(val) else "N/A"
+        except Exception:
+            return "N/A"
+
+    k5 = data[["Datetime","Close","Volume","異動標記","K線形態","成交量標記"]].tail(5).copy()
+    k5["Datetime"] = k5["Datetime"].dt.strftime("%m-%d")
+    k5_rows = []
+    for _, r in k5.iterrows():
+        sigs_short = str(r["異動標記"])[:60] + "…" if len(str(r["異動標記"])) > 60 else str(r["異動標記"])
+        k5_rows.append(
+            f"  {r['Datetime']} 收${r['Close']:.2f} {r['成交量標記']} "
+            f"{r['K線形態']}｜{sigs_short}"
+        )
+
+    st.session_state[f"ai_snap_{ticker}"] = {
+        "ticker":      ticker,
+        "period":      period,
+        "interval":    interval,
+        "datetime":    str(last.get("Datetime", ""))[:16],
+        "close":       _safe(last["Close"]),
+        "prev_close":  _safe(prev["Close"]),
+        "pct_chg":     f"{(last['Close']-prev['Close'])/prev['Close']*100:+.2f}"
+                       if prev["Close"] else "N/A",
+        "rsi":         _safe(last.get("RSI"), ".1f"),
+        "macd":        _safe(last.get("MACD"), ".4f"),
+        "signal_line": _safe(last.get("Signal_Line"), ".4f"),
+        "ema5":        _safe(last.get("EMA5")),
+        "ema10":       _safe(last.get("EMA10")),
+        "ema30":       _safe(last.get("EMA30")),
+        "ema40":       _safe(last.get("EMA40")),
+        "sma50":       _safe(last.get("SMA50")),
+        "sma200":      _safe(last.get("SMA200")),
+        "vwap":        _safe(last.get("VWAP")),
+        "mfi":         _safe(last.get("MFI"), ".1f"),
+        "obv_trend":   ("OBV↑" if pd.notna(last.get("OBV")) and
+                        data["OBV"].iloc[-1] > data["OBV"].iloc[-5] else "OBV↓"),
+        "vix":         _safe(last.get("VIX"), ".1f"),
+        "volume":      _fmt_vol(last["Volume"]),
+        "vol_ma5":     _fmt_vol(last.get("前5均量", 0)),
+        "vol_tag":     str(last.get("成交量標記", "")),
+        "kline_pat":   str(last.get("K線形態", "")),
+        "signals":     str(last.get("異動標記", "無")),
+        "dense":       [{"low":    f"{a['price_low']:.2f}",
+                         "high":   f"{a['price_high']:.2f}",
+                         "center": f"{a['price_center']:.2f}"}
+                        for a in dense_areas],
+        "k5_lines":    k5_rows,
+    }
+
+
+def _build_signal_prompt(ticker: str) -> str:
+    """
+    場景 A：信號觸發時的即時 prompt。
+    注入即時技術指標 + 觸發信號 + 回測勝率 + 密集區。
+    用戶複製貼去任何 AI 可獲得具體操作建議。
+    """
+    snap = st.session_state.get(f"ai_snap_{ticker}")
+    if not snap:
+        return f"⚠️ {ticker} 尚未有即時數據，請先讓主監控刷新一次。"
+
+    # ── 三維回測最佳組合 Top2 ──
+    bt_top3_lines = []
+    for key, dim in [(f"bt_df_sig_{ticker}", "信號組合"),
+                     (f"bt_df_vol_{ticker}", "信號+成交量"),
+                     (f"bt_df_kl_{ticker}",  "信號+K線")]:
+        df = st.session_state.get(key)
+        if df is not None and not df.empty:
+            for _, r in df.head(2).iterrows():
+                bt_top3_lines.append(
+                    f"  [{dim}] {r['信號組合']} | "
+                    f"勝率{r['勝率(%)']}% | 出現{r['出現次數']}次 | "
+                    f"均盈虧{r.get('平均盈虧(%)', 'N/A')}%"
+                )
+    bt_top3 = "\n".join(bt_top3_lines) if bt_top3_lines else "  尚未執行三維回測"
+
+    # ── 爆升回測摘要 ──
+    sp_bt = st.session_state.get(f"sp_result_{ticker}")
+    surge_lines = []
+    if sp_bt and not sp_bt.get("error"):
+        for row in sp_bt.get("feature_power", [])[:3]:
+            surge_lines.append(
+                f"  {row['特徵']}: 預測力{row['預測力倍數']}x "
+                f"(爆升前{row['爆升前出現率']}% vs 非爆升{row['非爆升出現率']}%)"
+            )
+        hs = sp_bt.get("horizon_stats", {})
+        if hs:
+            try:
+                best = max(hs.items(),
+                           key=lambda x: float(str(x[1].get("勝率", 0)).replace("%", "")))
+                surge_lines.append(
+                    f"  最佳持倉: {best[0]} → "
+                    f"均漲{best[1].get('平均漲幅','N/A')}% 勝率{best[1].get('勝率','N/A')}%"
+                )
+            except Exception:
+                pass
+    surge_summary = "\n".join(surge_lines) if surge_lines else "  尚未執行爆升回測"
+
+    # ── 密集區分支撐/壓力 ──
+    dense = snap["dense"]
+    try:
+        cur = float(snap["close"])
+        supports    = ["$" + a["center"] for a in dense if float(a["center"]) < cur]
+        resistances = ["$" + a["center"] for a in dense if float(a["center"]) > cur]
+    except Exception:
+        supports = resistances = []
+    dense_str = (
+        f"  支撐：{' / '.join(supports[-2:]) or '無'}\n"
+        f"  壓力：{' / '.join(resistances[:2]) or '無'}"
+    )
+
+    prompt = f"""你是一位專業股票交易分析師，擅長量價技術分析。
+請根據以下完整數據，給出具體可執行的操作建議。
+
+━━━ {ticker} 即時市況（{snap['datetime']}，{snap['period']}/{snap['interval']}）━━━
+
+【價格】
+  現價：${snap['close']}　昨收：${snap['prev_close']}　漲跌：{snap['pct_chg']}%
+
+【技術指標】
+  RSI：{snap['rsi']}　MACD：{snap['macd']}　Signal：{snap['signal_line']}
+  EMA5：{snap['ema5']}　EMA10：{snap['ema10']}　EMA30：{snap['ema30']}　EMA40：{snap['ema40']}
+  SMA50：{snap['sma50']}　SMA200：{snap['sma200']}
+  VWAP：{snap['vwap']}　MFI：{snap['mfi']}　{snap['obv_trend']}　VIX：{snap['vix']}
+
+【成交量】
+  今日：{snap['volume']}　5日均量：{snap['vol_ma5']}　標記：{snap['vol_tag']}
+
+【今日K線形態】
+  {snap['kline_pat']}
+
+【今日觸發信號】
+  {snap['signals']}
+
+【近5根K線走勢】
+{chr(10).join(snap['k5_lines'])}
+
+【成交密集區】
+{dense_str}
+
+【三維回測最佳組合（歷史統計）】
+{bt_top3}
+
+【爆升前特徵（歷史統計）】
+{surge_summary}
+
+━━━ 請回答以下問題 ━━━
+
+1. 📊 當前技術面總結：多空力道？趨勢強弱？
+2. 🎯 操作建議：做多 / 做空 / 觀望？信心度（1-5）？
+3. 📍 具體條件：進場價、止損位、目標價（請給具體數字）
+4. ⏱️ 持倉建議：持倉多少天較合理？
+5. ⚠️ 主要風險：1-2個最需注意的風險點
+6. 📋 判斷依據：主要依賴上面哪些數據做出判斷？
+
+請用繁體中文回答，給出具體數字，避免模糊表述。"""
+
+    return prompt
+
+
+def _build_overview_prompt(tickers: list) -> str:
+    """
+    場景 B：所有監控股票的每日總覽 prompt。
+    一次問所有 ticker 的狀況，讓 AI 給出今日操作優先級。
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    lines = [
+        f"你是一位專業股票交易分析師。以下是我的股票監控系統今日數據（{today}），",
+        "請分析每隻股票的當前狀況，並給出今日操作優先級排序。\n",
+        "━━━ 各股票即時快照 ━━━\n",
+    ]
+
+    has_data = False
+    for tk in tickers:
+        snap = st.session_state.get(f"ai_snap_{tk}")
+        if not snap:
+            lines.append(f"【{tk}】尚無數據\n")
+            continue
+        has_data = True
+
+        sigs_short = snap["signals"][:80] + "…" if len(snap["signals"]) > 80 else snap["signals"]
+
+        best_wr = "N/A"
+        df_sig = st.session_state.get(f"bt_df_sig_{tk}")
+        if df_sig is not None and not df_sig.empty:
+            best_wr = f"{df_sig.iloc[0]['勝率(%)']}%（{str(df_sig.iloc[0]['信號組合'])[:30]}）"
+
+        try:
+            e5, e10, e30 = float(snap["ema5"]), float(snap["ema10"]), float(snap["ema30"])
+            ema_arr = "多頭排列" if e5>e10>e30 else ("空頭排列" if e5<e10<e30 else "交叉中")
+        except Exception:
+            ema_arr = "N/A"
+
+        try:
+            rsi_v = float(snap["rsi"])
+            rsi_str = f"{rsi_v:.1f}({'超買' if rsi_v>70 else '超賣' if rsi_v<30 else '中性'})"
+        except Exception:
+            rsi_str = snap["rsi"]
+
+        lines.append(
+            f"【{tk}】{snap['datetime']} | {snap['period']}/{snap['interval']}\n"
+            f"  價格：${snap['close']}（{snap['pct_chg']}%）"
+            f"| RSI：{rsi_str} | MACD：{snap['macd']} | VIX：{snap['vix']}\n"
+            f"  EMA排列：{ema_arr} | 成交量：{snap['volume']}（{snap['vol_tag']}）\n"
+            f"  K線：{snap['kline_pat']} | 信號：{sigs_short}\n"
+            f"  最佳回測勝率：{best_wr}\n"
+            f"  密集區：{', '.join(['$'+a['center'] for a in snap['dense']]) or '無'}\n"
+        )
+
+    if not has_data:
+        return "⚠️ 尚無任何股票的即時數據，請先讓主監控刷新一次。"
+
+    lines += [
+        "━━━ 請回答以下問題 ━━━\n",
+        "1. 📊 大市環境：根據 VIX 和各股技術面，今日整體市場情緒如何？",
+        "2. 🥇 優先級排序：今日最值得操作的 1-2 隻股票，及具體原因",
+        "3. 🚫 需要迴避：哪些股票信號偏弱或風險較高？",
+        "4. 📋 整體策略：今日應偏進攻（多）還是偏防守（觀望/空）？",
+        "5. ⚠️ 主要風險：今日最需注意的宏觀/技術風險",
+        "\n請用繁體中文回答，給出具體分析，避免泛泛而談。",
+    ]
+    return "\n".join(lines)
+
+
+
 def _enrich_data(df: pd.DataFrame, params: dict, mfi_win: int,
                  include_vix: bool = False, vix_period: str = "",
                  vix_interval: str = "",
@@ -328,8 +666,12 @@ def _enrich_data(df: pd.DataFrame, params: dict, mfi_win: int,
     df["Continuous_Down"] = df["Down"] * (df["Down"].groupby((df["Down"] == 0).cumsum()).cumcount() + 1)
 
     W = int(mfi_win)
-    df["High_Max"] = df["High"].rolling(W).max()
-    df["Low_Min"]  = df["Low"].rolling(W).min()
+    # FIX v3.6: High_Max/Low_Min（BreakOut_5K 用）與 MFI 窗口解耦
+    # 原本共用 mfi_win，改 MFI 窗口會連帶改突破窗口（不相關指標耦合）
+    # 改為固定 5 根，與信號名稱「5K」語義一致
+    _BREAKOUT_WIN = 5
+    df["High_Max"] = df["High"].rolling(_BREAKOUT_WIN).max()
+    df["Low_Min"]  = df["Low"].rolling(_BREAKOUT_WIN).min()
     df = compute_mfi_divergence(df, W)
     df["OBV_Roll_Max"] = df["OBV"].rolling(20).max()
     df["OBV_Roll_Min"] = df["OBV"].rolling(20).min()
@@ -372,6 +714,28 @@ def _attach_kline_and_vol(df: pd.DataFrame, ticker: str, period: str,
     return df
 
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  CACHED PRICE DATA  (FIX P2-#4: 主監控 yfinance 加 60 秒快取)
+#  用可哈希參數作 key，避免每次 rerun 重抓網路。TTL=60s 保持近即時。
+# ═════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_price_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    """
+    統一的價格數據抓取入口（帶快取）。
+    TTL=60s：主監控用，保持近即時但避免每次 rerun 都打 yfinance。
+    回傳已標準化的 DataFrame（Datetime 欄位、tz-naive）。
+    """
+    df = yf.Ticker(ticker).history(period=period, interval=interval).reset_index()
+    if df.empty:
+        return df
+    if "Date" in df.columns:
+        df = df.rename(columns={"Date": "Datetime"})
+    df["Datetime"] = pd.to_datetime(df["Datetime"]).dt.tz_localize(None)
+    return df
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  CACHED K-LINE PATTERN (FIX: use hashable params, not DataFrame)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -402,7 +766,7 @@ def _classify_kline(row, idx, df, body_ratio, shadow_ratio, doji_body):
     if idx == 0:
         return p, t
     po, pc = df["Open"].iloc[idx-1], df["Close"].iloc[idx-1]
-    ph, pl = df["High"].iloc[idx-1], df["Low"].iloc[idx-1]
+    _, _  = df["High"].iloc[idx-1], df["Low"].iloc[idx-1]  # prev high/low（未使用，保留計算供未來擴展）
     co, cc, ch, cl = row["Open"], row["Close"], row["High"], row["Low"]
     body   = abs(cc - co)
     rng    = ch - cl if ch != cl else 1e-9
@@ -479,7 +843,7 @@ def send_email_alert(ticker: str, price_pct: float, volume_pct: float, active_si
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
             srv.login(SENDER_EMAIL, SENDER_PASSWORD)
             srv.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, msg.as_string())
-        st.toast(f"📬 Email 已發送")
+        st.toast("📬 Email 已發送")
     except Exception as e:
         st.error(f"Email 發送失敗：{e}")
 
@@ -553,27 +917,62 @@ def _combo_mask(combo: tuple, sig_index: dict,
     return onehot[:, cols].all(axis=1)
 
 
+def _prefilter_signals(all_s: list, sig_index: dict,
+                       onehot: "np.ndarray", valid: "np.ndarray",
+                       min_occ: int) -> list:
+    """
+    SPEED: 組合剪枝。單一信號若連自己都達不到 min_occ 次，
+    任何「包含它」的組合（AND 後只會更少）也一定達不到 → 直接從候選池剔除。
+    這能在組合爆炸前就把搜尋空間大幅縮小（指數級效果）。
+    回傳：通過頻率門檻的信號清單（保持原排序）。
+    """
+    col_counts = (onehot[valid]).sum(axis=0)  # 每個信號在有效列的出現次數
+    return [s for s in all_s if col_counts[sig_index[s]] >= min_occ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SPEED: 預計算共用物件（_BtCtx），三個維度函數共用同一份 one-hot 矩陣，
+#         避免 _build_onehot 重複執行三次（原本各算一次，現在算一次傳入）。
+# ─────────────────────────────────────────────────────────────────────────────
+class _BtCtx:
+    """回測共用預計算物件，由 _build_bt_ctx 建立，傳入三個維度函數。"""
+    __slots__ = ("close_arr","next_close_arr","next_up","valid",
+                 "all_s","sig_index","onehot","cand_s")
+
+
+def _build_bt_ctx(df: "pd.DataFrame", min_occ: int) -> "_BtCtx":
+    """
+    SPEED: 預計算所有維度共用的 numpy 陣列與 one-hot 矩陣，只算一次。
+    """
+    ctx = _BtCtx()
+    ctx.close_arr      = df["Close"].to_numpy()
+    ctx.next_close_arr = df["Close"].shift(-1).to_numpy()
+    ctx.next_up        = (ctx.next_close_arr > ctx.close_arr)
+    ctx.valid          = ~np.isnan(ctx.next_close_arr)   # FIX BUG-02
+    ctx.all_s, ctx.sig_index, ctx.onehot = _build_onehot(df)
+    ctx.cand_s = _prefilter_signals(
+        ctx.all_s, ctx.sig_index, ctx.onehot, ctx.valid, min_occ
+    )
+    return ctx
+
+
 # ── FIX BUG-02: 回測勝率排除最後一根 NaN ─────────────────────────────────────
 def _base_signal_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
-                         min_occ: int) -> "pd.DataFrame":
+                         min_occ: int,
+                         _ctx: "_BtCtx | None" = None) -> "pd.DataFrame":
     """
     維度 1：純信號組合勝率（向量化加速版）
+    _ctx 由呼叫方傳入以避免重複計算（SPEED 優化）。
     """
-    df = df.copy()
-    close_arr      = df["Close"].to_numpy()
-    next_close_arr = df["Close"].shift(-1).to_numpy()
-    next_up        = (next_close_arr > close_arr)
-
-    # FIX BUG-02: 排除最後一根 (shift(-1) 產生 NaN，會被當成 False)
-    _valid = ~np.isnan(next_close_arr)
-
-    all_s, sig_index, onehot = _build_onehot(df)
+    if _ctx is None:
+        _ctx = _build_bt_ctx(df.copy(), min_occ)
+    ctx = _ctx
 
     rows = []
-    for r in range(min_combo, min(max_combo + 1, len(all_s) + 1)):
-        for combo in combinations(all_s, r):
-            mask    = _combo_mask(combo, sig_index, onehot) & _valid
-            n_hit   = int(mask.sum())
+    for r in range(min_combo, min(max_combo + 1, len(ctx.cand_s) + 1)):
+        for combo in combinations(ctx.cand_s, r):
+            mask  = _combo_mask(combo, ctx.sig_index, ctx.onehot) & ctx.valid
+            n_hit = int(mask.sum())
             if n_hit < min_occ:
                 continue
             is_sell = sum(1 for s in combo if s in SELL_SIGNALS) > len(combo) / 2
@@ -583,8 +982,8 @@ def _base_signal_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
                 "成交量標記":  "—",
                 "K線形態":     "—",
                 "信號數量":    r,
-                "勝率(%)":     round(_calc_wr(next_up[mask], is_sell), 1),
-                "平均盈虧(%)": _calc_avg_pnl(close_arr, next_close_arr, mask, is_sell),
+                "勝率(%)":     round(_calc_wr(ctx.next_up[mask], is_sell), 1),
+                "平均盈虧(%)": _calc_avg_pnl(ctx.close_arr, ctx.next_close_arr, mask, is_sell),
                 "出現次數":    n_hit,
                 "方向":        "做空" if is_sell else "做多",
             })
@@ -594,28 +993,26 @@ def _base_signal_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
 
 
 def _signal_x_volume_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
-                              min_occ: int) -> "pd.DataFrame":
+                              min_occ: int,
+                              _ctx: "_BtCtx | None" = None) -> "pd.DataFrame":
     """
     維度 2：信號組合 × 成交量標記（向量化加速版）
+    _ctx 由呼叫方傳入以避免重複計算（SPEED 優化）。
     """
     if "成交量標記" not in df.columns:
         return pd.DataFrame()
-    df = df.copy()
-    close_arr      = df["Close"].to_numpy()
-    next_close_arr = df["Close"].shift(-1).to_numpy()
-    next_up        = (next_close_arr > close_arr)
-    _valid = ~np.isnan(next_close_arr)  # FIX BUG-02
+    if _ctx is None:
+        _ctx = _build_bt_ctx(df.copy(), min_occ)
+    ctx = _ctx
 
     vol_arr  = df["成交量標記"].to_numpy()
     vol_放量 = (vol_arr == "放量")
     vol_縮量 = (vol_arr == "縮量")
 
-    all_s, sig_index, onehot = _build_onehot(df)
-
     rows = []
-    for r in range(min_combo, min(max_combo + 1, len(all_s) + 1)):
-        for combo in combinations(all_s, r):
-            base_mask = _combo_mask(combo, sig_index, onehot) & _valid
+    for r in range(min_combo, min(max_combo + 1, len(ctx.cand_s) + 1)):
+        for combo in combinations(ctx.cand_s, r):
+            base_mask = _combo_mask(combo, ctx.sig_index, ctx.onehot) & ctx.valid
             n_base    = int(base_mask.sum())
             if n_base < min_occ:
                 continue
@@ -631,8 +1028,8 @@ def _signal_x_volume_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
                     "成交量標記":  vol_label,
                     "K線形態":     "—",
                     "信號數量":    r,
-                    "勝率(%)":     round(_calc_wr(next_up[mask], is_sell), 1),
-                    "平均盈虧(%)": _calc_avg_pnl(close_arr, next_close_arr, mask, is_sell),
+                    "勝率(%)":     round(_calc_wr(ctx.next_up[mask], is_sell), 1),
+                    "平均盈虧(%)": _calc_avg_pnl(ctx.close_arr, ctx.next_close_arr, mask, is_sell),
                     "出現次數":    n_hit,
                     "方向":        "做空" if is_sell else "做多",
                 })
@@ -642,30 +1039,27 @@ def _signal_x_volume_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
 
 
 def _signal_x_kline_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
-                             min_occ: int) -> "pd.DataFrame":
+                             min_occ: int,
+                             _ctx: "_BtCtx | None" = None) -> "pd.DataFrame":
     """
     維度 3：信號組合 × K線形態（向量化加速版）
+    _ctx 由呼叫方傳入以避免重複計算（SPEED 優化）。
     """
     if "K線形態" not in df.columns:
         return pd.DataFrame()
-    df = df.copy()
-    close_arr      = df["Close"].to_numpy()
-    next_close_arr = df["Close"].shift(-1).to_numpy()
-    next_up        = (next_close_arr > close_arr)
-    _valid = ~np.isnan(next_close_arr)  # FIX BUG-02
+    if _ctx is None:
+        _ctx = _build_bt_ctx(df.copy(), min_occ)
+    ctx = _ctx
 
     kline_arr  = df["K線形態"].fillna("普通K線").to_numpy()
     kline_vals = [k for k in df["K線形態"].dropna().unique()
                   if k and k != "普通K線"]
-
     kline_masks = {kl: (kline_arr == kl) for kl in kline_vals}
 
-    all_s, sig_index, onehot = _build_onehot(df)
-
     rows = []
-    for r in range(min_combo, min(max_combo + 1, len(all_s) + 1)):
-        for combo in combinations(all_s, r):
-            base_mask = _combo_mask(combo, sig_index, onehot) & _valid
+    for r in range(min_combo, min(max_combo + 1, len(ctx.cand_s) + 1)):
+        for combo in combinations(ctx.cand_s, r):
+            base_mask = _combo_mask(combo, ctx.sig_index, ctx.onehot) & ctx.valid
             n_base    = int(base_mask.sum())
             if n_base < min_occ:
                 continue
@@ -681,8 +1075,8 @@ def _signal_x_kline_combos(df: "pd.DataFrame", min_combo: int, max_combo: int,
                     "成交量標記":  "—",
                     "K線形態":     kl,
                     "信號數量":    r,
-                    "勝率(%)":     round(_calc_wr(next_up[mask], is_sell), 1),
-                    "平均盈虧(%)": _calc_avg_pnl(close_arr, next_close_arr, mask, is_sell),
+                    "勝率(%)":     round(_calc_wr(ctx.next_up[mask], is_sell), 1),
+                    "平均盈虧(%)": _calc_avg_pnl(ctx.close_arr, ctx.next_close_arr, mask, is_sell),
                     "出現次數":    n_hit,
                     "方向":        "做空" if is_sell else "做多",
                 })
@@ -862,8 +1256,9 @@ def _summary_stats(detail_df: "pd.DataFrame") -> dict:
 
 def backtest_signal_combinations(df: "pd.DataFrame", min_combo=2,
                                   max_combo=4, min_occ=3) -> "pd.DataFrame":
-    """保留舊介面相容。"""
-    return _base_signal_combos(df, min_combo, max_combo, min_occ)
+    """保留舊介面相容。FIX P2-#6: 傳入預計算 ctx 避免重複建 onehot。"""
+    _ctx = _build_bt_ctx(df, min_occ)
+    return _base_signal_combos(df, min_combo, max_combo, min_occ, _ctx=_ctx)
 
 
 
@@ -877,10 +1272,16 @@ def compute_all_signals(data: pd.DataFrame,
     """
     Vectorised-friendly signal marker.
     Returns pd.Series of strings aligned to data index.
+
+    FIX P1-#3: 每根 K 線包 try/except，單根數據異常（NaN/除零）只回傳空字串，
+    不會拋出例外導致整個 ticker tab 崩潰。
     """
     results = []
     for idx, row in data.iterrows():
-        results.append(_mark_one(row, idx, data, params))
+        try:
+            results.append(_mark_one(row, idx, data, params))
+        except Exception:
+            results.append("")   # 異常時靜默略過，不中斷整批計算
     return pd.Series(results, index=data.index)
 
 
@@ -916,10 +1317,14 @@ def _mark_one(row, idx, data, p):
         if row["High"] < pv("Low"):   sigs.append("📉 High<Low")
 
     # ── Close position ────────────────────────────────────────────────────────
-    cnh = row.get("Close_N_High", np.nan)
-    cnl = row.get("Close_N_Low",  np.nan)
-    if pd.notna(cnh) and cnh >= p["HIGH_N_HIGH_TH"]:  sigs.append("📈 HIGH_N_HIGH")
-    if pd.notna(cnl) and cnl >= p["LOW_N_LOW_TH"]:    sigs.append("📉 LOW_N_LOW")
+    # FIX v3.6: 直接用當根 OHLC 計算，不依賴 Close_N_High/Low 欄位
+    # （回測中該欄位是 NaN，改為即時計算確保回測與主監控一致）
+    _hl = (row["High"] - row["Low"])
+    if _hl > 0:
+        _cnh = (row["Close"] - row["Low"])  / _hl   # 收在當日區間的高位比例
+        _cnl = (row["High"]  - row["Close"]) / _hl  # 收在當日區間的低位比例
+        if _cnh >= p["HIGH_N_HIGH_TH"]:  sigs.append("📈 HIGH_N_HIGH")
+        if _cnl >= p["LOW_N_LOW_TH"]:    sigs.append("📉 LOW_N_LOW")
 
     # ── MACD ──────────────────────────────────────────────────────────────────
     # FIX BUG-06: 放寬 RSI 過濾到 <70 / >30（原為 <50 / >50，導致信號幾乎不觸發）
@@ -959,12 +1364,24 @@ def _mark_one(row, idx, data, p):
             trend   = window5.mean() if len(window5) else row["Close"]
             prev5   = data["Close"].iloc[max(0, idx-6):idx-1].mean() if idx >= 6 else trend
             hi_vol  = row["Volume"] > fma
-            reversal = (idx < len(data)-1 and
-                        ((is_up and data["Close"].iloc[idx+1] < row["Close"]) or
-                         (is_dn and data["Close"].iloc[idx+1] > row["Close"])))
+            # FIX BUG-09 (look-ahead): 原本用 data["Close"].iloc[idx+1]（下一根收盤）
+            #   判斷反轉 → 前瞻偏差，會虛高回測勝率。
+            #   改用「當根 intrabar 回吐」判斷衰竭：只用當根 O/H/L/C，不看未來。
+            #   - 收盤位置：上漲跳空衰竭 = 收在當根區間下半部 (close_pos < 0.5)
+            #               下跌跳空衰竭 = 收在當根區間上半部 (close_pos > 0.5)
+            #   - 收盤回吐：上漲跳空但收盤 < 開盤（收陰，吐回跳空）
+            #               下跌跳空但收盤 > 開盤（收陽，吐回跳空）
+            _rng = (row["High"] - row["Low"]) or 1e-9
+            _close_pos = (row["Close"] - row["Low"]) / _rng
+            reversal = (
+                (is_up and row["Close"] < row["Open"] and _close_pos < 0.5) or
+                (is_dn and row["Close"] > row["Open"] and _close_pos > 0.5)
+            )
             if is_up:
                 if reversal and hi_vol:
-                    sigs.append("📈 衰竭跳空(上)")
+                    # FIX v3.6: 衰竭跳空(上)本質是看空信號（跳空高開後收陰回吐）
+                    # 改用 📉 標記，與 SELL_SIGNALS 對齊
+                    sigs.append("📉 衰竭跳空(上)")
                 elif row["Close"] > trend > prev5 and hi_vol:
                     sigs.append("📈 持續跳空(上)")
                 elif row["High"] > data["High"].iloc[max(0,idx-5):idx].max() and hi_vol:
@@ -986,24 +1403,51 @@ def _mark_one(row, idx, data, p):
     if row.get("Continuous_Down", 0) >= p["CONT_DOWN"]  and rsi_val > 30: sigs.append("📉 連續向下賣出")
 
     # ── SMA50/200 ─────────────────────────────────────────────────────────────
-    if pd.notna(row.get("SMA50")):
-        if row["Close"] > row["SMA50"] and macd > 0:   sigs.append("📈 SMA50上升趨勢")
-        elif row["Close"] < row["SMA50"] and macd < 0: sigs.append("📉 SMA50下降趨勢")
-    if pd.notna(row.get("SMA50")) and pd.notna(row.get("SMA200")):
-        if row["Close"] > row["SMA50"] > row["SMA200"] and macd > 0:   sigs.append("📈 SMA50_200上升趨勢")
-        elif row["Close"] < row["SMA50"] < row["SMA200"] and macd < 0: sigs.append("📉 SMA50_200下降趨勢")
+    # FIX v3.6: 原為純狀態信號（價格在SMA50之上就每天觸發），改為只在穿越當天觸發
+    if idx > 0 and pd.notna(row.get("SMA50")):
+        _sma50 = row["SMA50"]
+        _prev_sma50 = pv("SMA50")
+        if pd.notna(_prev_sma50):
+            if row["Close"] > _sma50 and pv("Close") <= _prev_sma50 and macd > 0:
+                sigs.append("📈 SMA50上升趨勢")
+            elif row["Close"] < _sma50 and pv("Close") >= _prev_sma50 and macd < 0:
+                sigs.append("📉 SMA50下降趨勢")
+    if idx > 0 and pd.notna(row.get("SMA50")) and pd.notna(row.get("SMA200")):
+        _sma50 = row["SMA50"]; _sma200 = row["SMA200"]
+        _p_close = pv("Close"); _p_sma50 = pv("SMA50")
+        if pd.notna(_p_close) and pd.notna(_p_sma50):
+            if (row["Close"] > _sma50 > _sma200 and macd > 0
+                    and (_p_close <= _p_sma50)):
+                sigs.append("📈 SMA50_200上升趨勢")
+            elif (row["Close"] < _sma50 < _sma200 and macd < 0
+                    and (_p_close >= _p_sma50)):
+                sigs.append("📉 SMA50_200下降趨勢")
 
     # ── New buy/sell ──────────────────────────────────────────────────────────
+    # FIX v3.6: 原條件太寬（陽線+開>昨收+RSI<70），幾乎每天都觸發
+    # 加入成交量過濾（放量確認），提高信號可靠性
     if idx > 0:
         pc = pv("Close")
-        if row["Close"] > row["Open"] > pc and rsi_val < 70: sigs.append("📈 新买入信号")
-        if row["Close"] < row["Open"] < pc and rsi_val > 30: sigs.append("📉 新卖出信号")
+        if (row["Close"] > row["Open"] > pc
+                and row["Volume"] > fma         # 放量確認
+                and rsi_val < 70):
+            sigs.append("📈 新买入信号")
+        if (row["Close"] < row["Open"] < pc
+                and row["Volume"] > fma         # 放量確認
+                and rsi_val > 30):
+            sigs.append("📉 新卖出信号")
 
     # ── Pivot ─────────────────────────────────────────────────────────────────
+    # FIX v3.6: 原「🔄 新转折点」無方向（漲跌都觸發同一個信號），且 MACD>Signal
+    # 只過濾多頭但漲跌皆算，邏輯矛盾。改為拆分兩個有方向的信號：
+    # 📈 新转折点(漲)：價量異動 + 價格上漲 + MACD金叉或正值
+    # 📉 新转折点(跌)：價量異動 + 價格下跌 + MACD死叉或負值
     pr = row.get("Price Change %", 0) or 0
     vc_ = row.get("Volume Change %", 0) or 0
-    if abs(pr) > p["PC_TH"] and abs(vc_) > p["VC_TH"] and macd > row.get("Signal_Line", 0):
-        sigs.append("🔄 新转折点")
+    _sig_line = row.get("Signal_Line", 0) or 0
+    if abs(pr) > p["PC_TH"] and abs(vc_) > p["VC_TH"]:
+        if pr > 0 and macd > _sig_line:   sigs.append("🔄 新转折点(漲)")
+        elif pr < 0 and macd < _sig_line: sigs.append("🔄 新转折点(跌)")
     if len(sigs) > 8:
         sigs.append(f"🔥 關鍵轉折({len(sigs)}信號)")
 
@@ -1013,10 +1457,15 @@ def _mark_one(row, idx, data, p):
         if rsi_val > 70 and macd < 0 and pv("MACD") >= 0:   sigs.append("📉 RSI-MACD Overbought Crossover")
 
     # ── EMA-SMA trend ─────────────────────────────────────────────────────────
+    # FIX v3.6: 原為純狀態信號（EMA5>EMA10 就每天觸發），改為只在交叉當天觸發
     s50 = row.get("SMA50", np.nan)
-    if pd.notna(s50):
-        if row["EMA5"] > row["EMA10"] and row["Close"] > s50: sigs.append("📈 EMA-SMA Uptrend Buy")
-        if row["EMA5"] < row["EMA10"] and row["Close"] < s50: sigs.append("📉 EMA-SMA Downtrend Sell")
+    if idx > 0 and pd.notna(s50):
+        if (row["EMA5"] > row["EMA10"] and pv("EMA5") <= pv("EMA10")
+                and row["Close"] > s50):
+            sigs.append("📈 EMA-SMA Uptrend Buy")
+        if (row["EMA5"] < row["EMA10"] and pv("EMA5") >= pv("EMA10")
+                and row["Close"] < s50):
+            sigs.append("📉 EMA-SMA Downtrend Sell")
 
     # ── Volume-MACD ───────────────────────────────────────────────────────────
     if idx > 0:
@@ -1024,13 +1473,21 @@ def _mark_one(row, idx, data, p):
         if row["Volume"] > fma and macd < 0 and pv("MACD") >= 0: sigs.append("📉 Volume-MACD Sell")
 
     # ── EMA 10/30/40 ─────────────────────────────────────────────────────────
+    # FIX v3.6: EMA40 預設值陷阱修正
+    # 原 row.get("EMA40", 0) → EMA40 欄位缺失時預設 0，EMA10 幾乎必>0，強烈買入必連帶觸發
+    # 原 row.get("EMA40", 999999) → 強烈賣出同理
+    # 改為先確認 EMA40 存在且非 NaN 才比較
     if idx > 0:
+        _ema40 = row.get("EMA40", None)
+        _ema40_ok = pd.notna(_ema40)
         if row["EMA10"] > row["EMA30"] and pv("EMA10") <= pv("EMA30"):
             sigs.append("📈 EMA10_30買入")
-            if row["EMA10"] > row.get("EMA40", 0): sigs.append("📈 EMA10_30_40強烈買入")
+            if _ema40_ok and row["EMA10"] > _ema40:
+                sigs.append("📈 EMA10_30_40強烈買入")
         if row["EMA10"] < row["EMA30"] and pv("EMA10") >= pv("EMA30"):
             sigs.append("📉 EMA10_30賣出")
-            if row["EMA10"] < row.get("EMA40", 999999): sigs.append("📉 EMA10_30_40強烈賣出")
+            if _ema40_ok and row["EMA10"] < _ema40:
+                sigs.append("📉 EMA10_30_40強烈賣出")
 
     # ── Candlestick patterns ───────────────────────────────────────────────────
     if idx > 0:
@@ -1044,10 +1501,19 @@ def _mark_one(row, idx, data, p):
             sigs.append("📈 看漲吞沒")
         if pc2 > po and cc < co and co >= pc2 and cc <= po and hi_vol and rsi_val > 30:
             sigs.append("📉 看跌吞沒")
-        if body < rng*0.3 and lower >= 2*max(body,1e-9) and upper < lower and hi_vol and rsi_val < 70:
-            sigs.append("📈 錘頭線")
-        if body < rng*0.3 and lower >= 2*max(body,1e-9) and upper < lower and hi_vol and rsi_val > 30:
-            sigs.append("📉 上吊線")
+        # FIX v3.6: 錘頭線與上吊線條件完全相同，只用 RSI 過濾無法區分
+        # 加入5日趨勢方向判斷：
+        #   錘頭線（Hammer）= 長下影線形態出現在下跌趨勢底部 → 看漲反轉
+        #   上吊線（Hanging Man）= 相同形態出現在上漲趨勢頂部 → 看跌反轉
+        _hammer_shape = (body < rng*0.3 and lower >= 2*max(body,1e-9)
+                         and upper < lower and hi_vol)
+        if _hammer_shape:
+            _w5_mean = data["Close"].iloc[max(0,idx-5):idx].mean() if idx >= 1 else row["Close"]
+            _in_downtrend = row["Close"] < _w5_mean   # 收盤低於5日均 = 下跌趨勢中
+            if _in_downtrend and rsi_val < 50:
+                sigs.append("📈 錘頭線")      # 下跌趨勢中出現 → 看漲反轉
+            elif not _in_downtrend and rsi_val > 50:
+                sigs.append("📉 上吊線")      # 上漲趨勢中出現 → 看跌反轉
         if pc2 > po and co > pc2 and cc < co and cc < (po+pc2)/2 and hi_vol:
             sigs.append("📉 烏雲蓋頂")
         if pc2 < po and co < pc2 and cc > co and cc > (po+pc2)/2 and hi_vol:
@@ -1166,7 +1632,7 @@ ALL_BT_INTERVALS = ["1m","5m","15m","30m","1h","1d","1wk","1mo"]
 with st.sidebar:
     st.header("⚙️ 參數設定")
     input_tickers     = st.text_input("股票代號（逗號分隔）",
-                                       "TSLA, UVXY, UVIX, NIO, TSLL, XPEV, GLD, META, GOOGL, AAPL, NVDA, AMZN, TSM, MSFT")
+                                       "TSLA,AAPL,AMZN,NVDA,QQQ")
     selected_period   = st.selectbox("時間範圍",
                                       ["1d","5d","1mo","3mo","6mo","1y","2y","5y","ytd","max"], index=5)
     selected_interval = st.selectbox("資料間隔",
@@ -1218,15 +1684,32 @@ selected_tickers = [t.strip().upper() for t in (input_tickers or "").split(",") 
 
 # ── Telegram signal selection ─────────────────────────────────────────────────
 ALL_SIGNAL_TYPES = sorted([
-    "📈 Low>High","📈 BreakOut_5K","📉 BreakDown_5K","📈 MACD買入","📈 EMA買入","📈 價格趨勢買入","📈 價格趨勢買入(量)",
-    "📈 價格趨勢買入(量%)","📈 普通跳空(上)","📈 突破跳空(上)","📈 持續跳空(上)",
-    "📈 衰竭跳空(上)","📈 連續向上買入","📈 SMA50上升趨勢","📈 SMA50_200上升趨勢",
+    "📈 Low>High","📈 HIGH_N_HIGH","📈 BreakOut_5K","📈 MACD買入","📈 EMA買入",
+    "📈 價格趨勢買入","📈 價格趨勢買入(量)","📈 價格趨勢買入(量%)",
+    "📈 普通跳空(上)","📈 突破跳空(上)","📈 持續跳空(上)",
+    # FIX v3.6: 衰竭跳空(上)已改為 📉 並移入 SELL_SIGNALS，此處刪除舊 📈 版本
+    "📈 連續向上買入","📈 SMA50上升趨勢","📈 SMA50_200上升趨勢",
     "📈 新买入信号","📈 RSI-MACD Oversold Crossover","📈 EMA-SMA Uptrend Buy",
     "📈 Volume-MACD Buy","📈 EMA10_30買入","📈 EMA10_30_40強烈買入",
     "📈 看漲吞沒","📈 刺透形態","📈 錘頭線","📈 早晨之星",
     "📈 VWAP買入","📈 MFI牛背離買入","📈 OBV突破買入",
-    "📈 VIX平靜買入","📈 VIX下降趨勢買入","✅ 量價","🔄 新转折点",
+    "📈 VIX平靜買入","📈 VIX下降趨勢買入","✅ 量價",
+    "🔄 新转折点(漲)","🔄 新转折点(跌)",  # FIX v3.6: 拆分為兩個有方向的信號
 ] + list(SELL_SIGNALS))
+
+# ── 全域 Telegram 信號選擇（適用於所有股票）──────────────────────────────────
+# FIX: 由原本「每支股票各自一個 multiselect」改為「一個全域選擇套用到所有股票」。
+# 在側欄統一設定一次，所有 ticker 共用同一份推播信號清單；
+# 個別股票仍可透過各自的 Telegram 開關 (tg_enabled_{ticker}) 靜音。
+with st.sidebar:
+    st.subheader("📡 Telegram 推播信號（全域）")
+    GLOBAL_SELECTED_SIGNALS = st.multiselect(
+        "選擇需要 Telegram 推播的信號（適用於所有股票）",
+        ALL_SIGNAL_TYPES,
+        default=["📈 新买入信号"],
+        key="global_selected_signals",
+        help="此清單會套用到上方所有股票代號；個別股票仍可用各自的 Telegram 開關靜音。",
+    )
 
 # ── 每支股票預設條件表 ─────────────────────────────────────────────────────────
 # ── 每支股票預設條件表 ─────────────────────────────────────────────────────────
@@ -1377,6 +1860,7 @@ def _tg_editor(ticker: str) -> pd.DataFrame:
 
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def _run_backtest_for_ticker(
     tk: str,
     period: str,
@@ -1400,17 +1884,33 @@ def _run_backtest_for_ticker(
 
         # 共用指標計算（回測不含 VIX）
         bt_data = _enrich_data(bt_data, PARAMS, int(MFI_WIN))
-        for _nc in ["📈 股價漲跌幅(%)","📊 成交量變動幅(%)","Close_N_High","Close_N_Low"]:
-            bt_data[_nc] = np.nan
+
+        # FIX: 量價異動欄位 — 與主監控用相同公式計算，讓「✅ 量價」信號能參與回測。
+        # pa = (|今日漲跌幅| - 5日均漲跌幅) / 5日均漲跌幅 × 100  （比5日均大多少%）
+        # va = (今日成交量 - 5日均量) / 5日均量 × 100              （比5日均量多多少%）
+        _bt_price_abs = bt_data["Price Change %"].abs()
+        bt_data["前5均價ABS"]         = _bt_price_abs.rolling(5).mean()
+        bt_data["📈 股價漲跌幅(%)"]   = (
+            (_bt_price_abs - bt_data["前5均價ABS"]) /
+            bt_data["前5均價ABS"].replace(0, np.nan)
+        ).round(4) * 100
+        bt_data["📊 成交量變動幅(%)"] = (
+            (bt_data["Volume"] - bt_data["前5均量"]) /
+            bt_data["前5均量"].replace(0, np.nan)
+        ).round(4) * 100
+        bt_data["Close_N_High"] = np.nan
+        bt_data["Close_N_Low"]  = np.nan
 
         bt_data["異動標記"] = compute_all_signals(bt_data, PARAMS)
         bt_data = _attach_kline_and_vol(bt_data, tk, period, interval,
                                          BODY_RATIO_TH, SHADOW_RATIO_TH, DOJI_BODY_TH)
 
         _kw = dict(min_combo=min_combo, max_combo=max_combo, min_occ=min_occ)
-        df_sig = _base_signal_combos(bt_data, **_kw)
-        df_vol = _signal_x_volume_combos(bt_data, **_kw)
-        df_kl  = _signal_x_kline_combos(bt_data, **_kw)
+        # SPEED: 建一次共用預計算物件，三個維度函數共享，避免重複建 one-hot 矩陣
+        _ctx = _build_bt_ctx(bt_data, min_occ)
+        df_sig = _base_signal_combos(bt_data, **_kw, _ctx=_ctx)
+        df_vol = _signal_x_volume_combos(bt_data, **_kw, _ctx=_ctx)
+        df_kl  = _signal_x_kline_combos(bt_data, **_kw, _ctx=_ctx)
 
         return df_sig, df_vol, df_kl, len(bt_data)
 
@@ -1545,7 +2045,7 @@ if selected_tickers:
 
     with _gc1:
         if st.button(
-            f"🟢 全部開啟",
+            "🟢 全部開啟",
             key="tg_all_on",
             use_container_width=True,
             disabled=_all_on or _mute_on,
@@ -1557,7 +2057,7 @@ if selected_tickers:
 
     with _gc2:
         if st.button(
-            f"🔴 全部關閉",
+            "🔴 全部關閉",
             key="tg_all_off",
             use_container_width=True,
             disabled=_all_off,
@@ -1595,7 +2095,7 @@ if selected_tickers:
 
     with _bo_col1:
         if st.button(
-            f"🚀 全部開啟新高",
+            "🚀 全部開啟新高",
             key="bo_high_all_on",
             use_container_width=True,
             disabled=(_bo_n_high == _n_all),
@@ -1606,7 +2106,7 @@ if selected_tickers:
 
     with _bo_col2:
         if st.button(
-            f"🚫 全部關閉新高",
+            "🚫 全部關閉新高",
             key="bo_high_all_off",
             use_container_width=True,
             disabled=(_bo_n_high == 0),
@@ -1617,7 +2117,7 @@ if selected_tickers:
 
     with _bo_col3:
         if st.button(
-            f"🔻 全部開啟新低",
+            "🔻 全部開啟新低",
             key="bo_low_all_on",
             use_container_width=True,
             disabled=(_bo_n_low == _n_all),
@@ -1628,7 +2128,7 @@ if selected_tickers:
 
     with _bo_col4:
         if st.button(
-            f"🚫 全部關閉新低",
+            "🚫 全部關閉新低",
             key="bo_low_all_off",
             use_container_width=True,
             disabled=(_bo_n_low == 0),
@@ -1727,61 +2227,86 @@ with st.expander("⚡ 一鍵全部股票自動回測 & 更新 Telegram 條件表
         _prog_bar  = st.progress(0, text="準備開始…")
         _status_ph = st.empty()
 
-        for _ai, _atk in enumerate(selected_tickers):
-            _prog = _ai / len(selected_tickers)
-            _prog_bar.progress(_prog, text=f"正在處理 {_atk}（{_ai+1}/{len(selected_tickers)}）…")
-            _status_ph.info(f"⏳ **{_atk}**：下載 {_auto_period} / {_auto_interval} 資料並計算中…")
+        # SPEED: 並行抓取 + 運算（ThreadPoolExecutor；yfinance 為 I/O bound，
+        #   GIL 不影響效果）。_run_backtest_for_ticker 有 @st.cache_data，
+        #   多執行緒呼叫完全安全。session_state / UI 寫入仍在主執行緒完成。
+        _bt_kwargs = dict(
+            period    = _fetch_period,
+            interval  = _auto_interval,
+            min_combo = int(_auto_min_combo),
+            max_combo = int(max(_auto_max_combo, _auto_min_combo)),
+            min_occ   = int(_auto_min_occ),
+        )
+        _n_tickers = len(selected_tickers)
+        _MAX_WORKERS = min(_n_tickers, 6)   # 最多 6 執行緒，避免 yfinance 限速
 
-            _dsig, _dvol, _dkl, _n_or_err = _run_backtest_for_ticker(
-                tk        = _atk,
-                period    = _fetch_period,
-                interval  = _auto_interval,
-                min_combo = int(_auto_min_combo),
-                max_combo = int(max(_auto_max_combo, _auto_min_combo)),
-                min_occ   = int(_auto_min_occ),
-            )
+        _futures_map: dict = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as _pool:
+            for _atk in selected_tickers:
+                _futures_map[_pool.submit(_run_backtest_for_ticker, tk=_atk, **_bt_kwargs)] = _atk
 
-            if _dsig is None:
+            _done_count = 0
+            for _fut in concurrent.futures.as_completed(_futures_map):
+                _atk = _futures_map[_fut]
+                _done_count += 1
+                _prog = _done_count / _n_tickers
+                _prog_bar.progress(_prog, text=f"完成 {_atk}（{_done_count}/{_n_tickers}）…")
+
+                try:
+                    _dsig, _dvol, _dkl, _n_or_err = _fut.result()
+                except Exception as _exc:
+                    _auto_results.append({
+                        "ticker": _atk, "status": "❌", "n_conds": 0,
+                        "msg": str(_exc),
+                    })
+                    _status_ph.error(f"❌ **{_atk}** 回測失敗：{_exc}")
+                    continue
+
+                if _dsig is None:
+                    _auto_results.append({
+                        "ticker": _atk, "status": "❌", "n_conds": 0,
+                        "msg": str(_n_or_err),
+                    })
+                    _status_ph.error(f"❌ **{_atk}** 回測失敗：{_n_or_err}")
+                    continue
+
+                _merged = _merge_dims_to_conds(
+                    _dsig, _dvol, _dkl,
+                    wr_thr  = float(_auto_wr_thr),
+                    pnl_thr = float(_auto_pnl_thr),
+                )
+
+                if _merged.empty:
+                    _cond_str = f"勝率 ≥ {_auto_wr_thr}%"
+                    if _auto_pnl_thr != 0:
+                        _cond_str += f" 且 平均盈虧 ≥ {_auto_pnl_thr}%"
+                    _auto_results.append({
+                        "ticker": _atk, "status": "⚠️", "n_conds": 0,
+                        "msg": f"無符合條件（{_cond_str}）的組合，條件表未更新",
+                    })
+                    _status_ph.warning(f"⚠️ **{_atk}**：無符合條件的組合")
+                    continue
+
+                st.session_state[_ss_key(_atk)] = _merged
+                _tg_save(_merged, _atk)
+
                 _auto_results.append({
-                    "ticker": _atk, "status": "❌", "n_conds": 0,
-                    "msg": str(_n_or_err),
+                    "ticker": _atk, "status": "✅",
+                    "n_conds": len(_merged),
+                    "msg": (
+                        f"寫入 {len(_merged)} 條條件"
+                        f"（{_auto_period}/{_auto_interval}，"
+                        f"勝率 ≥ {_auto_wr_thr}%，盈虧 ≥ {_auto_pnl_thr}%）"
+                    ),
                 })
-                _status_ph.error(f"❌ **{_atk}** 回測失敗：{_n_or_err}")
-                continue
-
-            _merged = _merge_dims_to_conds(
-                _dsig, _dvol, _dkl,
-                wr_thr  = float(_auto_wr_thr),
-                pnl_thr = float(_auto_pnl_thr),
-            )
-
-            if _merged.empty:
-                _cond_str = f"勝率 ≥ {_auto_wr_thr}%"
-                if _auto_pnl_thr != 0:
-                    _cond_str += f" 且 平均盈虧 ≥ {_auto_pnl_thr}%"
-                _auto_results.append({
-                    "ticker": _atk, "status": "⚠️", "n_conds": 0,
-                    "msg": f"無符合條件（{_cond_str}）的組合，條件表未更新",
-                })
-                _status_ph.warning(f"⚠️ **{_atk}**：無符合條件的組合")
-                continue
-
-            st.session_state[_ss_key(_atk)] = _merged
-            _tg_save(_merged, _atk)
-
-            _auto_results.append({
-                "ticker": _atk, "status": "✅",
-                "n_conds": len(_merged),
-                "msg": (
-                    f"寫入 {len(_merged)} 條條件"
-                    f"（{_auto_period}/{_auto_interval}，"
-                    f"勝率 ≥ {_auto_wr_thr}%，盈虧 ≥ {_auto_pnl_thr}%）"
-                ),
-            })
-            _status_ph.success(f"✅ **{_atk}**：寫入 {len(_merged)} 條條件")
+                _status_ph.success(f"✅ **{_atk}**：寫入 {len(_merged)} 條條件")
 
         _prog_bar.progress(1.0, text="全部完成！")
         _status_ph.empty()
+
+        # FIX P4-#10: 並行完成順序隨機，按 selected_tickers 原序重排結果
+        _ticker_order = {tk: i for i, tk in enumerate(selected_tickers)}
+        _auto_results.sort(key=lambda r: _ticker_order.get(r["ticker"], 999))
 
         _ok_list   = [r for r in _auto_results if r["status"] == "✅"]
         _warn_list = [r for r in _auto_results if r["status"] == "⚠️"]
@@ -1895,12 +2420,18 @@ for tab_idx, ticker in enumerate(selected_tickers):
                     icon="🔕",
                 )
 
-        selected_signals = st.multiselect(
-            f"選擇 {ticker} 需要 Telegram 推播的信號",
-            ALL_SIGNAL_TYPES,
-            default=["📈 新买入信号"],
-            key=f"selected_signals_{ticker}",
+        # ── 使用全域信號清單（適用於所有股票）────────────────────────────
+        # FIX: 不再為每支股票各設一個 multiselect；統一讀取側欄的全域選擇。
+        selected_signals = st.session_state.get(
+            "global_selected_signals", GLOBAL_SELECTED_SIGNALS
         )
+        if selected_signals:
+            st.caption(
+                f"📡 推播信號（全域）：{'、'.join(selected_signals)}　"
+                f"｜如需修改請至左側欄「Telegram 推播信號（全域）」"
+            )
+        else:
+            st.caption("📡 尚未選擇任何全域推播信號（左側欄設定）")
 
         # ── 突破新高/跌破新低 開關 ────────────────────────────────────────
         _bo_col1, _bo_col2 = st.columns(2)
@@ -1946,15 +2477,10 @@ for tab_idx, ticker in enumerate(selected_tickers):
             )
 
         try:
-            # ── Fetch data ────────────────────────────────────────────────────
-            stock = yf.Ticker(ticker)
-            data  = stock.history(period=selected_period, interval=selected_interval).reset_index()
+            # ── Fetch data（FIX P2-#4: 改用快取封裝，TTL=60s）────────────────
+            data = _fetch_price_data(ticker, selected_period, selected_interval)
             if data.empty or len(data) < 5:
                 st.warning(f"⚠️ {ticker} 數據不足"); continue
-
-            if "Date" in data.columns:
-                data = data.rename(columns={"Date": "Datetime"})
-            data["Datetime"] = pd.to_datetime(data["Datetime"]).dt.tz_localize(None)
 
             # ── Basic columns ─────────────────────────────────────────────────
             hl_range = (data["High"] - data["Low"]).replace(0, np.nan)
@@ -1987,6 +2513,10 @@ for tab_idx, ticker in enumerate(selected_tickers):
 
             # ── Volume profile ────────────────────────────────────────────────
             dense_areas = calculate_volume_profile(data, int(VP_BINS), int(VP_WINDOW), int(VP_TOP_N))
+
+            # v3.7: 存入即時快照，供 AI Prompt 生成函數使用
+            _save_ticker_snapshot(ticker, data, dense_areas,
+                                  selected_period, selected_interval)
             latest_close = data["Close"].iloc[-1]
             near_dense = False; near_dense_info = ""
             for a in dense_areas:
@@ -1997,7 +2527,7 @@ for tab_idx, ticker in enumerate(selected_tickers):
 
             # ── Metrics row ───────────────────────────────────────────────────
             try:
-                prev_close = stock.info.get("previousClose", data["Close"].iloc[-2])
+                prev_close = yf.Ticker(ticker).info.get("previousClose", data["Close"].iloc[-2])
             except Exception:
                 prev_close = data["Close"].iloc[-2]
             cur_price = data["Close"].iloc[-1]
@@ -2168,6 +2698,16 @@ for tab_idx, ticker in enumerate(selected_tickers):
                 file_name=f"{ticker}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
             )
+
+            # ── AI Prompt（v3.7）─────────────────────────────────────────────
+            with st.expander(f"🤖 複製 AI 分析 Prompt（{ticker}）", expanded=False):
+                st.caption(
+                    "以下 Prompt 已包含即時技術指標、信號、回測數據和密集區。"
+                    "複製後貼去 ChatGPT / Claude / Gemini 即可獲得具體操作建議，無需 API。"
+                )
+                _sig_prompt = _build_signal_prompt(ticker)
+                st.code(_sig_prompt, language=None)
+                st.caption("💡 小提示：如需追問，可直接在 AI 對話繼續提問，無需重新貼 Prompt。")
 
             # ══════════════════════════════════════════════════════════════════
             #  TELEGRAM / EMAIL ALERTS  (FIX BUG-03: 去重機制)
@@ -2420,7 +2960,7 @@ for tab_idx, ticker in enumerate(selected_tickers):
                     elif _send_ok_count > 0 and _send_err_msgs:
                         st.warning(f"⚠️ 部分發送成功（{_send_ok_count}/{_total_matched}）。\n" + "\n".join(_send_err_msgs))
                     elif _send_err_msgs:
-                        st.error(f"❌ **Telegram 全部發送失敗**：\n" + "\n".join(_send_err_msgs), icon="🚨")
+                        st.error("❌ **Telegram 全部發送失敗**：\n" + "\n".join(_send_err_msgs), icon="🚨")
                     # 如果 _send_ok_count == 0 且無 err（都已去重跳過），靜默不顯示
 
             # ── Breakout / Breakdown alerts (with dedup + toggle) ─────────
@@ -2537,15 +3077,23 @@ for tab_idx, ticker in enumerate(selected_tickers):
                             if _dsig is None:
                                 st.warning(f"回測失敗：{_n_or_err}"); st.stop()
 
-                            # 額外保存原始回測數據用於逐筆驗證
-                            _bt_raw = yf.Ticker(ticker).history(
-                                period=bt_period, interval=bt_interval).reset_index()
-                            if "Date" in _bt_raw.columns:
-                                _bt_raw = _bt_raw.rename(columns={"Date": "Datetime"})
-                            _bt_raw["Datetime"] = pd.to_datetime(_bt_raw["Datetime"]).dt.tz_localize(None)
+                            # FIX P1-#1: 改用快取函數抓取，與 _run_backtest_for_ticker
+                            # 拿到同一份數據，避免兩次抓取時間點不同造成信號/驗證不一致。
+                            _bt_raw = _fetch_price_data(ticker, bt_period, bt_interval).copy()
                             _bt_raw = _enrich_data(_bt_raw, PARAMS, int(MFI_WIN))
-                            for _nc in ["📈 股價漲跌幅(%)","📊 成交量變動幅(%)","Close_N_High","Close_N_Low"]:
-                                _bt_raw[_nc] = np.nan
+                            # FIX: 量價欄位與主監控相同公式，讓「✅ 量價」逐筆驗證一致
+                            _bt_raw_price_abs = _bt_raw["Price Change %"].abs()
+                            _bt_raw["前5均價ABS"]         = _bt_raw_price_abs.rolling(5).mean()
+                            _bt_raw["📈 股價漲跌幅(%)"]   = (
+                                (_bt_raw_price_abs - _bt_raw["前5均價ABS"]) /
+                                _bt_raw["前5均價ABS"].replace(0, np.nan)
+                            ).round(4) * 100
+                            _bt_raw["📊 成交量變動幅(%)"] = (
+                                (_bt_raw["Volume"] - _bt_raw["前5均量"]) /
+                                _bt_raw["前5均量"].replace(0, np.nan)
+                            ).round(4) * 100
+                            _bt_raw["Close_N_High"] = np.nan
+                            _bt_raw["Close_N_Low"]  = np.nan
                             _bt_raw["異動標記"] = compute_all_signals(_bt_raw, PARAMS)
                             _bt_raw = _attach_kline_and_vol(_bt_raw, ticker, bt_period, bt_interval,
                                                              BODY_RATIO_TH, SHADOW_RATIO_TH, DOJI_BODY_TH)
@@ -2635,7 +3183,7 @@ for tab_idx, ticker in enumerate(selected_tickers):
                                     "實際勝率可能不同。"
                                 )
 
-                            if st.button(f"📊 展開逐筆記錄", key=f"detail_btn_{dim_key}_{ticker}"):
+                            if st.button("📊 展開逐筆記錄", key=f"detail_btn_{dim_key}_{ticker}"):
                                 _bt_raw = st.session_state.get(f"bt_raw_data_{ticker}")
                                 if _bt_raw is None:
                                     st.warning("請重新點擊「🚀 開始回測」"); return
@@ -2696,7 +3244,7 @@ for tab_idx, ticker in enumerate(selected_tickers):
                                              height=min(600, 35*(len(_detail)+1)+40))
 
                                 # CSV export
-                                import io, csv as _csv
+                                import io
                                 _buf = io.StringIO()
                                 _detail.to_csv(_buf, index=False)
                                 st.download_button(
@@ -3007,7 +3555,7 @@ def _surge_backtest(
     train_surge = [i for i in surge_idx    if i < split_pos]
     test_surge  = [i for i in surge_idx    if i >= split_pos]
     train_non   = [i for i in non_surge_idx if i < split_pos]
-    test_non    = [i for i in non_surge_idx if i >= split_pos]
+    # test_non = [i for i in non_surge_idx if i >= split_pos]  # 保留供未來 out-of-sample 驗證
 
     # ── 前N天特徵提取函數 ────────────────────────────────────────────────────
     def _extract_features(idx_list: list, lb: int) -> pd.DataFrame:
@@ -3070,7 +3618,6 @@ def _surge_backtest(
                 feat["vol_slope_pos"] = False
 
             # ── E: 底部抬升 ──────────────────────────────────────────────────
-            closes = window["Close"].values
             lows   = window["Low"].values
             # 把窗口分三段，看每段低點是否遞增
             third = max(1, len(lows) // 3)
@@ -3123,8 +3670,6 @@ def _surge_backtest(
     ]
 
     power_rows = []
-    n_surge    = max(len(feat_df),    1)
-    n_non      = max(len(non_feat_df), 1)
 
     for col, label in bool_features:
         if col not in feat_df.columns:
@@ -3476,6 +4021,7 @@ def _build_bt_summary(bt: dict, ticker: str) -> str:
     return "\n".join(lines)
 
 
+
 def _build_surge_tg_msg(sig: dict, bt: dict) -> str:
     ticker  = sig["ticker"]
     now     = sig["time"].strftime("%Y-%m-%d %H:%M")
@@ -3717,9 +4263,9 @@ with tabs[-3]:
 
                     if sig is None:
                         st.markdown(
-                            f"<div style='background:#161b27;border:1px solid #1e2535;"
-                            f"border-radius:8px;padding:14px;text-align:center;color:#5a6580'>"
-                            f"⚪ 尚未掃描</div>",
+                            "<div style='background:#161b27;border:1px solid #1e2535;"
+                            "border-radius:8px;padding:14px;text-align:center;color:#5a6580'>"
+                            "⚪ 尚未掃描</div>",
                             unsafe_allow_html=True
                         )
                         continue
@@ -3927,6 +4473,26 @@ with tabs[-3]:
                         st.success("✅ 訓練集與測試集分布均衡，規律相對可靠")
 
     # ══════════════════════════════════════════════════════════════════════════
+    #  📋 每日總覽 AI Prompt（v3.7）
+    # ══════════════════════════════════════════════════════════════════════════
+    if done_tickers:
+        st.divider()
+        st.markdown("### 📋 每日總覽 AI Prompt")
+        st.caption(
+            "把所有監控股票的即時數據濃縮成一個 Prompt，"
+            "貼去 ChatGPT / Claude / Gemini 獲得今日操作優先級分析。"
+        )
+        _overview_snap_count = sum(
+            1 for t in selected_tickers
+            if st.session_state.get(f"ai_snap_{t}")
+        )
+        st.caption(f"已有即時快照：{_overview_snap_count}/{len(selected_tickers)} 支股票")
+        with st.expander("📊 展開每日總覽 Prompt", expanded=False):
+            _overview_prompt = _build_overview_prompt(selected_tickers)
+            st.code(_overview_prompt, language=None)
+            st.caption("💡 若某股票顯示「尚無數據」，請確認主監控已展開該股票的 Tab 並刷新。")
+
+    # ══════════════════════════════════════════════════════════════════════════
     #  🤖 AI 分析對話（多股版：可選擇對哪隻股票問問題）
     # ══════════════════════════════════════════════════════════════════════════
     if done_tickers:
@@ -3943,11 +4509,17 @@ with tabs[-3]:
         with ai_c2:
             ai_lang = st.selectbox("回覆語言", ["繁體中文", "简体中文", "English"], key="ai_lang")
 
+        # v3.7: 切換 ticker 時自動清空對話，避免上下文混亂
+        if st.session_state.get("ai_last_target") != ai_target:
+            st.session_state["ai_chat_history"] = []
+            st.session_state.pop("ai_pending_prompt", None)
+            st.session_state["ai_last_target"] = ai_target
+
         # 預設問題
         preset_prompts = {
-            "📊 整體解讀":   "根據以上回測數據，幫我解讀 {ticker} 的爆升前信號特徵，哪些最可靠？哪些要小心？",
-            "🔍 最佳進場":   "根據回測數據，{ticker} 最佳的進場條件是什麼？請給出具體量化條件組合。",
-            "⚠️ 風險評估":   "根據回測數據，這套信號有哪些風險？什麼市場環境最容易失效？",
+            "📊 整體解讀":   "根據以上數據，幫我解讀 {ticker} 當前技術面，多空力道如何？",
+            "🔍 最佳進場":   "根據回測數據，{ticker} 現在最佳的進場條件是什麼？請給具體數字。",
+            "⚠️ 風險評估":   "根據當前數據，這套信號有哪些風險？什麼環境下最容易失效？",
             "📈 持倉策略":   "根據最優持倉天數和大市環境，幫我制定 {ticker} 的持倉和止損策略。",
             "🔬 過擬合評估": "訓練集和測試集的數據是否一致？這套規律是真實的還是歷史過擬合？",
             "💰 實盤建議":   "如果要實盤交易 {ticker}，資金管理和風控怎麼設置？",
@@ -3970,7 +4542,7 @@ with tabs[-3]:
                 st.markdown(msg["content"])
 
         pending     = st.session_state.pop("ai_pending_prompt", None)
-        user_input  = st.chat_input("直接問 AI（回測數據已自動注入）", key="ai_chat_input")
+        user_input  = st.chat_input("直接問 AI（即時數據 + 回測已自動注入）", key="ai_chat_input")
         final_input = pending or user_input
 
         if final_input:
@@ -3979,15 +4551,21 @@ with tabs[-3]:
                 st.markdown(final_input)
 
             lang_map = {"繁體中文":"請用繁體中文回覆","简体中文":"请用简体中文回复","English":"Please reply in English"}
-            bt_summary = _build_bt_summary(st.session_state.get(f"sp_result_{ai_target}"), ai_target)
+
+            # v3.7: system prompt 同時注入即時快照 + 爆升回測摘要
+            _snap_prompt = _build_signal_prompt(ai_target)
+            bt_summary   = _build_bt_summary(st.session_state.get(f"sp_result_{ai_target}"), ai_target)
             system_prompt = f"""你是一位專業的量化交易分析師，專注於股票量價信號分析。
 {lang_map.get(st.session_state.get('ai_lang','繁體中文'),'請用繁體中文回覆')}
 
-以下是 {ai_target} 的完整回測數據：
+以下是 {ai_target} 的完整即時市況與回測數據：
 
+{_snap_prompt}
+
+補充爆升回測統計：
 {bt_summary}
 
-分析原則：基於數據說話，給出具體數字；指出優勢和局限；結合大市環境；提醒財報週特殊性；誠實評估過擬合風險。"""
+分析原則：基於數據說話，給出具體數字；指出優勢和局限；結合大市環境；誠實評估過擬合風險。"""
 
             api_messages = [{"role":m["role"],"content":m["content"]}
                             for m in st.session_state["ai_chat_history"][:-1]]
