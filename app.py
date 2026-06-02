@@ -3055,7 +3055,7 @@ for tab_idx, ticker in enumerate(selected_tickers):
                 )
 
                 col_a, col_b, col_c = st.columns(3)
-                bt_min    = col_a.number_input("最少信號組合數", 2, 3, int(BT_MIN_COMBO), 1, key=f"bt_min_{ticker}")
+                bt_min    = col_a.number_input("最少信號組合數", 2, 4, int(BT_MIN_COMBO), 1, key=f"bt_min_{ticker}")
                 bt_max    = col_b.number_input("最多信號組合數", 2, 5, int(BT_MAX_COMBO), 1, key=f"bt_max_{ticker}")
                 bt_occ    = col_c.number_input("最少出現次數",   2, 20, int(BT_MIN_OCC),  1, key=f"bt_occ_{ticker}")
 
